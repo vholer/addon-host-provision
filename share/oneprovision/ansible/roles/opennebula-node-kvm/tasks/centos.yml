@@ -1,0 +1,39 @@
+---
+
+- block:
+  - name: Update centos-release package
+    yum: name=centos-release state=latest
+    register: yum_result
+    until: yum_result | succeeded
+    retries: 3
+    delay: 10
+  - name: Install qemu-ev repository
+    yum: name=centos-release-qemu-ev state=latest
+    register: yum_result
+    until: yum_result | succeeded
+    retries: 3
+    delay: 10
+  when: ansible_distribution == "CentOS" and opennebula_node_kvm_use_ev
+
+- name: Install qemu-kvm-ev
+  yum: name=qemu-kvm-ev state=present
+  register: yum_result
+  until: yum_result | succeeded
+  retries: 3
+  delay: 10
+  when: opennebula_node_kvm_use_ev
+
+- name: Install qemu-kvm (base)
+  yum: name=qemu-kvm state=present
+  register: yum_result
+  until: yum_result | succeeded
+  retries: 3
+  delay: 10
+  when: not opennebula_node_kvm_use_ev
+
+- name: Install OpenNebula node kvm package
+  yum: name=opennebula-node-kvm state=latest
+  register: yum_result
+  until: yum_result | succeeded
+  retries: 3
+  delay: 10
