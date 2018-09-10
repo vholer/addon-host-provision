@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -e
+
+GEMFILE=${GEMFILE:-$(dirname $0)/Gemfile}
+
+if ! [ -f "${GEMFILE}" ]; then
+    echo "ERROR: Gemfile '${GEMFILE}' not found" >&2
+    exit 1
+fi
+
+if ! bundler --version &>/dev/null; then
+    echo 'ERROR: "bundler" not found' >&2
+    exit 1
+fi
+
+###
+
+bundler install --system --gemfile="${GEMFILE}"

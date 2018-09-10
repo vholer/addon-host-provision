@@ -1,0 +1,431 @@
+#!/usr/bin/env ruby
+
+# -------------------------------------------------------------------------- #
+# Copyright 2002-2018, OpenNebula Project, OpenNebula Systems                #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
+ONE_LOCATION=ENV["ONE_LOCATION"]
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby"
+    REMOTES_LOCATION="/var/lib/one/remotes"
+    ANSIBLE_PLAYBOOK_LOCATION="/usr/share/one/oneprovision/ansible"
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby"
+    REMOTES_LOCATION=ONE_LOCATION+"/var/remotes"
+    ANSIBLE_PLAYBOOK_LOCATION=ONE_LOCATION+"/usr/share/oneprovision/ansible"
+end
+
+$: << RUBY_LIB_LOCATION
+$: << RUBY_LIB_LOCATION+"/cli"
+
+$PING_TIMEOUT  = 20
+$PING_RETRIES  = 10
+$MAX_RETRIES   = 3
+$RUN_MODE      = :interactive
+$FAIL_CHOICE   = :quit
+$CLEANUP       = false
+
+require 'command_parser'
+require 'one_helper/oneprovision_helper'
+require 'one_helper/onecluster_helper'
+require 'tempfile'
+require 'base64'
+
+CommandParser::CmdParser.new(ARGV) do
+    usage "`oneprovision` <command> [<file>] [<hostid>] [<args>] [<options>]"
+    version OpenNebulaHelper::ONE_VERSION
+
+    helper = OneProvisionHelper.new
+
+    before_proc do
+        helper.set_client(options)
+    end
+
+    ########################################################################
+    # Global Options
+    ########################################################################
+
+    IM = {
+        :name   => "im",
+        :short  => "-i im_mad",
+        :large  => "--im im_mad" ,
+        :description => "Set the information driver for the host",
+        :format => String
+    }
+
+    VMM = {
+        :name   => "vm",
+        :short  => "-v vmm_mad",
+        :large  => "--vm vmm_mad" ,
+        :description => "Set the virtualization driver for the host",
+        :format => String
+    }
+
+    VERBOSE = {
+        :name   => "verbose",
+        :short  => "-d",
+        :large  => "--verbose",
+        :description => "Set verbose logging mode",
+    }
+
+    DEBUG = {
+        :name   => "debug",
+        :short  => "-D",
+        :large  => "--debug" ,
+        :description => "Set debug logging mode",
+        :format => String
+    }
+
+    BATCH = {
+        :name   => "batch",
+        :short  => "-b",
+        :large  => "--batch",
+        :description => "Run in non-interactive mode (no questions)",
+        :format => String,
+    }
+
+    FAIL_RETRY = {
+        :name   => "fail_retry",
+        :large  => "--fail-retry number",
+        :description => "Set batch failover mode to number of retries",
+        :format => Integer
+    }
+
+    FAIL_CLEANUP = {
+        :name   => "fail_cleanup",
+        :large  => "--fail-cleanup",
+        :description => "Set batch failover mode to clean up and quit",
+    }
+
+    FAIL_SKIP = {
+        :name   => "fail_skip",
+        :large  => "--fail-skip",
+        :description => "Set batch failover mode to skip failing part",
+    }
+
+    FAIL_QUIT = {
+        :name   => "fail_quit",
+        :large  => "--fail-quit",
+        :description => "Set batch failover mode to quit (default)",
+    }
+
+    FORCE = {
+        :name   => "force",
+        :short  => "-F",
+        :large  => "--force",
+        :description => "Force configure to execute",
+        :format => String
+    }
+
+    HARD = {
+        :name   => "hard",
+        :short  => "-H",
+        :large  => "--hard",
+        :description => "Reset the host",
+        :format => String
+    }
+
+    PING_TIMEOUT = {
+        :name   => "ping_timeout",
+        :large  => "--ping-timeout seconds",
+        :description => "Set timeout for ping (default: #{$PING_TIMEOUT} secs)",
+        :format => Integer
+    }
+
+    PING_RETRIES = {
+        :name   => "ping_retries",
+        :large  => "--ping-retries number",
+        :description => "Set retries for ping (default: #{$PING_RETRIES})",
+        :format => Integer
+    }
+
+    MODES = CommandParser::OPTIONS - [ CommandParser::VERBOSE ] + [
+        VERBOSE, DEBUG, BATCH,
+        FAIL_RETRY, FAIL_CLEANUP, FAIL_SKIP, FAIL_QUIT ]
+
+    CREATE_OPTIONS = [ IM, VMM, OneClusterHelper::CLUSTER, MODES, PING_TIMEOUT, PING_RETRIES ]
+
+    ########################################################################
+    # Formatters for arguments
+    ########################################################################
+
+    set :format, :hostid, OneProvisionHelper.to_id_desc do |arg|
+        helper.to_id(arg)
+    end
+
+    set :format, :hostid_list, OneProvisionHelper.list_to_id_desc do |arg|
+        helper.list_to_id(arg)
+    end
+
+    ########################################################################
+    # Commands
+    ########################################################################
+
+    create_desc = <<-EOT.unindent
+        Provision a new Host via bare metal provider
+    EOT
+
+    command :create, create_desc, :config, :options=>CREATE_OPTIONS do
+        helper.get_mode(options)
+
+        if options[:im].nil? || options[:vm].nil?
+            STDERR.puts "Drivers are mandatory to create a host:"
+            STDERR.puts "\t -i information driver"
+            STDERR.puts "\t -v hypervisor driver"
+            exit (-1)
+        end
+
+        helper.check_ansible_version
+
+        # read provision file
+        cfg = helper.read_config(args[0])
+
+        if cfg.length != 1
+            helper.fail('Only 1 device supported for now')
+        else
+            cfg = cfg[0]
+        end
+
+        deploy_id = nil
+        pm_mad = nil
+
+        begin
+            $CLEANUP = true
+
+            # create deployment file
+            stubHost = helper.create_deployment_file(cfg, options[:im], options[:vm])
+
+            deployFile = Tempfile.new('xmlDeploy')
+            deployFile.close()
+            helper.write_file_log(deployFile.path, stubHost.to_xml)
+
+            # ask user to be patient, mandatory for now
+            STDERR.puts 'WARNING: This operation can take tens of minutes. Please be patient.'
+
+            # deploy host
+            pm_mad = stubHost.at('PM_MAD').text
+
+            $logger.info("Deploying")
+            deploy_id = helper.pm_driver_action(pm_mad, 'deploy', [deployFile.path, 'TODO'])
+
+            if deploy_id.nil? || deploy_id.strip.empty?
+                helper.fail('Deployment failed, no ID got from driver')
+            end
+
+            # create OpenNebula host
+            host = helper.create_host(stubHost.to_xml, deploy_id.strip, options)
+
+            name = helper.poll(host)
+            host.rename(name)
+            helper.configure_host(host, name)
+
+            puts "ID: " + host.id.to_s
+        rescue OneProvisionCleanupException
+            begin
+                helper.delete_host(host) if host
+            rescue
+            end
+
+            exit(-1)
+        rescue => e
+            helper.fail("Deployment failed on exception: #{e.to_s}")
+        ensure
+            deployFile.unlink()
+        end
+
+        0
+    end
+
+    ###
+
+    resume_desc = <<-EOT.unindent
+        Resume the host
+    EOT
+
+    command :resume, resume_desc, [:range,:hostid_list], :options=>MODES do
+        helper.get_mode(options)
+
+        helper.perform_actions(args[0],options,"enabled") do |host|
+            host.info
+
+            pm_mad = host['TEMPLATE/PM_MAD']
+
+            helper.check_host(pm_mad)
+
+            begin
+                # create resume deployment file
+                resumeFile = Tempfile.new("xmlResume")
+                resumeFile.close()
+                helper.write_file_log(resumeFile.path, host.to_xml())
+
+                $logger.info("Resuming host: #{host.id.to_s}")
+                helper.pm_driver_action(pm_mad, 'deploy', [resumeFile.path, host.name], host)
+
+                $logger.debug("Enabling OpenNebula host: #{host.id.to_s}")
+
+                name = helper.poll(host)
+                host.rename(name)
+                host.enable
+            ensure
+                resumeFile.unlink()
+            end
+        end
+    end
+
+    ###
+
+    poweroff_desc = <<-EOT.unindent
+        Power off the host
+    EOT
+
+    command :poweroff, poweroff_desc, [:range,:hostid_list], :options=>MODES do
+        helper.get_mode(options)
+
+        helper.perform_actions(args[0],options,"disabled") do |host|
+            host.info
+
+            pm_mad = host['TEMPLATE/PM_MAD']
+
+            deploy_id = host['TEMPLATE/PROVISION/DEPLOY_ID']
+            name = host.name
+
+            helper.check_host(pm_mad)
+
+            $logger.info("Powering off host: #{host.id.to_s}")
+            helper.pm_driver_action(pm_mad, 'shutdown', [deploy_id, name, 'SHUTDOWN_POWEROFF'], host)
+
+            $logger.debug("Offlining OpenNebula host: #{host.id.to_s}")
+
+            #Fix broken pipe exception on ubuntu 14.04
+            host.info
+
+            host.offline
+        end
+    end
+
+    ###
+
+    reboot_desc = <<-EOT.unindent
+        Reboot the host
+    EOT
+
+    command :reboot, reboot_desc, [:range,:hostid_list], :options=>[MODES, HARD] do
+        helper.get_mode(options)
+
+        helper.perform_actions(args[0],options,"disabled") do |host|
+            begin
+
+                helper.reset_host(host, (options.has_key? :hard))
+            rescue => e
+                helper.fail("#{(options.has_key? :hard) ? "Reset" : "Reboot"} failed on exception: #{e.to_s}")
+            end
+        end
+    end
+
+    ###
+
+    delete_desc = <<-EOT.unindent
+        Unprovisions and deletes the given Host
+    EOT
+
+    command :delete, delete_desc, [:range,:hostid_list], :options=>MODES do
+        helper.get_mode(options)
+
+        helper.perform_actions(args[0],options,"deleted") do |host|
+            begin
+                helper.delete_host(host)
+            rescue => e
+                helper.fail("Delete failed on exception: #{e.to_s}")
+            end
+        end
+    end
+
+    ###
+
+    configure_desc = <<-EOT.unindent
+        Run configuration on the host
+    EOT
+
+    command :configure, configure_desc, [:range,:hostid_list], :options=>[MODES,FORCE] do
+        helper.get_mode(options)
+
+        helper.perform_actions(args[0],options,"") do |host|
+            host.info
+
+            pm_mad = host['TEMPLATE/PM_MAD']
+            status = host['TEMPLATE/PROVISION_CONFIGURATION_STATUS']
+
+            helper.check_host(pm_mad)
+
+            if (status == 'configured') && (!options.has_key? :force)
+                helper.fail('Host is already configured')
+            end
+
+            begin
+                helper.configure_host(host)
+            rescue => e
+                helper.fail("Configure failed on exception: #{e.to_s}")
+            end
+        end
+    end
+
+    ###
+
+    ssh_desc = <<-EOT.unindent
+        Establish SSH conection to the host
+    EOT
+
+    command :ssh, ssh_desc, :hostid, [:command, nil] do
+        helper.perform_action(args[0],options,"") do |host|
+            host.info
+
+            ip = host["NAME"]
+            private_key = host["TEMPLATE/PROVISION_CONNECTION/PRIVATE_KEY"]
+            remote_user = host["TEMPLATE/PROVISION_CONNECTION/REMOTE_USER"]
+
+            exec("ssh -i #{private_key} #{remote_user}@#{ip} '#{args[1]}'")
+        end
+    end
+
+    ###
+
+    list_desc = <<-EOT.unindent
+        Lists bare metal Hosts in the pool
+    EOT
+
+    command :list, list_desc, :options=>CLIHelper::OPTIONS+OpenNebulaHelper::OPTIONS + [OpenNebulaHelper::DESCRIBE] do
+        if !options.has_key? :filter
+            options.merge!(filter: ["PROVIDER!=-"])
+        end
+
+        helper.list_pool(options)
+    end
+
+    ###
+
+    top_desc = <<-EOT.unindent
+        Lists bare metal Hosts continuously
+    EOT
+
+    command :top, top_desc, :options=>CLIHelper::OPTIONS+OpenNebulaHelper::OPTIONS do
+        if !options.has_key? :filter
+            options.merge!(filter: ["PROVIDER!=-"])
+        end
+
+        helper.list_pool(options, true)
+    end
+end
+
