@@ -33,4 +33,4 @@ Configuration types:
 Version history
 ===============
 
-* 1.0 (September 2018) - first prototype release
+* 5.6.0 (September 2018) - first prototype release

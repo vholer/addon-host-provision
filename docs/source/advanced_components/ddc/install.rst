@@ -27,14 +27,14 @@ CentOS/RHEL 7
 
 .. prompt:: bash $ auto
 
-   $ rpm -ivh opennebula-provision-5.6.1-1.noarch.rpm
+   $ rpm -ivh opennebula-provision-5.6.0-1.noarch.rpm
 
 Debian/Ubuntu
 -------------
 
 .. prompt:: bash $ auto
 
-   $ dpkg -i opennebula-provision_5.6.1-1_all.deb
+   $ dpkg -i opennebula-provision_5.6.0-1_all.deb
 
 2. Ruby dependencies
 ====================

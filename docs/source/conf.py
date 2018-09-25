@@ -42,7 +42,7 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = u'DDC'
+project = u'Host Provision'
 copyright = u'2018, OpenNebula Systems'
 
 # The version info for the project you're documenting, acts as replacement for

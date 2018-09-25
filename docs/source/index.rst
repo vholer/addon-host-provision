@@ -1,5 +1,5 @@
 ================================================================================
-Disaggregated Datacenters beta
+Host Provision
 ================================================================================
 
 .. _entry_point:
@@ -7,9 +7,9 @@ Disaggregated Datacenters beta
 Contents:
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 3
 
-   DDC <advanced_components/ddc/index>
+   Host Provision <advanced_components/ddc/index>
    Infrastructure Integration - Provision Driver <integration/infrastructure_integration/devel-pm>
 
 .. raw:: html
